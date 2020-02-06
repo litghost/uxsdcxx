@@ -27,20 +27,20 @@ def pass_at_init(attr: UxsdAttribute):
 
 	return True
 
-def _gen_attribute_arg(e: Union[UxsdElement, UxsdAttribute], out:bool=False) -> str:
-	if out:
-		return "%s * %s" % (e.type.cpp, checked(e.name))
+def _gen_attribute_arg(e: Union[UxsdElement, UxsdAttribute], attr_type:bool=False) -> str:
+	if attr_type:
+		return e.type.cpp
 	else:
 		return "%s %s" % (e.type.cpp, checked(e.name))
 
-def _gen_required_attribute_arg_list(context_type: str, attrs: List[UxsdAttribute], out:bool=False, context:str = "ctx") -> str:
+def _gen_required_attribute_arg_list(context_type: str, attrs: List[UxsdAttribute], attr_types:bool=False, context:str = "ctx") -> str:
 	args = []
-	if not out:
+	if not attr_types:
 		args.append("{} &{}".format(context_type, context))
 
 	for attr in sorted(attrs, key=lambda attr: attr.name):
 		if pass_at_init(attr):
-			args.append(_gen_attribute_arg(attr, out=out))
+			args.append(_gen_attribute_arg(attr, attr_type=attr_types))
 
 	return ', '.join(args)
 
@@ -275,10 +275,12 @@ def _gen_load_element_complex(t: UxsdElement, parent: str) -> str:
 		arg = "%s_%s" % (t.type.name, checked(attr.name))
 		out += "\t%s %s;\n" % (attr.type.cpp, arg)
 		args.append(arg)
-		load_args.append('&' + arg)
+		load_args.append(arg)
 
 	if len(load_args) > 0:
-		out += "\tload_%s_required_attributes(node, %s, report_error);\n" % (t.type.name, ', '.join(load_args))
+		out += "\tstd::tie({required_attrs}) = load_{name}_required_attributes(node, report_error);\n".format(
+				name=t.type.name,
+				required_attrs=', '.join(load_args))
 	if t.many:
 		out += "\tauto child_context = out.add_%s(%s);\n" % (_gen_stub_suffix(t, parent), ', '.join(args))
 	else:
@@ -434,6 +436,14 @@ def _gen_load_required_attrs(t: UxsdComplex) -> str:
 	assert len(t.attrs) > 0
 	N = len(t.attrs)
 	out = ""
+	for attr in t.attrs:
+		if not pass_at_init(attr):
+			continue
+
+		out += "{attr_type} {attr_name};\n".format(
+				attr_type=attr.type.cpp,
+				attr_name=checked(attr.name))
+
 	out += "std::bitset<%d> astate = 0;\n" % N
 	out += "for(pugi::xml_attribute attr = root.first_attribute(); attr; attr = attr.next_attribute()){\n"
 	out += "\tatok_%s in = lex_attr_%s(attr.name(), report_error);\n" % (t.cpp, t.cpp)
@@ -444,7 +454,7 @@ def _gen_load_required_attrs(t: UxsdComplex) -> str:
 	for attr in t.attrs:
 		out += "\tcase atok_%s::%s:\n" % (t.cpp, utils.to_token(attr.name))
 		if pass_at_init(attr):
-			out += "\t\t*%s = %s;\n" % (checked(attr.name), _gen_load_simple(attr.type, "attr.value()"))
+			out += "\t\t%s = %s;\n" % (checked(attr.name), _gen_load_simple(attr.type, "attr.value()"))
 		else:
 			out += "\t\t/* Attribute %s set after element init */\n" % attr.name
 		out += "\t\tbreak;\n"
@@ -455,6 +465,7 @@ def _gen_load_required_attrs(t: UxsdComplex) -> str:
 	mask = "".join(["1" if x.optional else "0" for x in t.attrs][::-1])
 	out += "std::bitset<%d> test_astate = astate | std::bitset<%d>(0b%s);\n" % (N, N, mask)
 	out += "if(!test_astate.all()) attr_error(test_astate, atok_lookup_%s, report_error);\n" % t.cpp
+	out += "return std::make_tuple({args});\n".format(args=', '.join(checked(attr.name) for attr in t.attrs if pass_at_init(attr)))
 	return out
 
 
@@ -493,8 +504,8 @@ def load_required_attrs_fn_from_complex_type(t: UxsdComplex) -> str:
 	which can load an XSD complex type from DOM &root into C++ object out.
 	"""
 	out = ""
-	out += "inline void load_%s_required_attributes(const pugi::xml_node &root, %s, const std::function<void(const char *)> * report_error){\n" % (
-			t.name, _gen_required_attribute_arg_list("", t.attrs, out=True))
+	out += "inline std::tuple<{attr_types}> load_{name}_required_attributes(const pugi::xml_node &root, const std::function<void(const char *)> * report_error) {{\n".format(
+			name=t.name, attr_types=_gen_required_attribute_arg_list("", t.attrs, attr_types=True))
 
 	out += utils.indent(_gen_load_required_attrs(t))
 
@@ -800,7 +811,9 @@ def render_header_file(schema: UxsdSchema, cmdline: str, input_file: str, interf
 		load_fn_decls.append("template <class T, typename Context>")
 		load_fn_decls.append("inline void load_%s(const pugi::xml_node &root, T &out, Context &context, const std::function<void(const char*)> *report_error, ptrdiff_t *offset_debug);" % (t.name))
 		if sum(pass_at_init(attr) for attr in t.attrs) > 0:
-			load_fn_decls.append("inline void load_%s_required_attributes(const pugi::xml_node &root, %s, const std::function<void(const char*)> * report_error);" % (t.name, _gen_required_attribute_arg_list("", t.attrs, out=True)))
+			load_fn_decls.append("inline std::tuple<{attr_types}> load_{name}_required_attributes(const pugi::xml_node &root, const std::function<void(const char*)> * report_error);".format(
+				name=t.name,
+				attr_types=_gen_required_attribute_arg_list("", t.attrs, attr_types=True)))
 	out += "\n".join(load_fn_decls)
 
 	out += "\n\n/* Declarations for internal write functions for the complex types. */\n"
